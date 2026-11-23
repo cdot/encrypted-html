@@ -70,10 +70,21 @@
     </style>
   </head>
   <body>
-    <script>{{script}}</script>
+    <script>
+      {{BURIAL}}
+      function handleDecrypt() {
+        const crypt = document.getElementById("content").textContent;
+        const pass = document.getElementById("pass").value;
+        try {
+          document.body.innerHTML = Burial.decrypt(crypt, pass);
+        } catch (e) {
+          alert(e); // failed to decrypt
+        }
+      }
+    </script>
     <div>
       <h1>This page has been encrypted</h1>
-      Enter the password to decrypt the content
+      Enter the password to see the content
       <p>
         <label for="pass">Password</label>
         <input id="pass" type="password" />
@@ -83,6 +94,6 @@
         <button class="btn" id="decrypt" onclick="handleDecrypt()">
           Decrypt</button>
       </p>
-    <div id="content" style="display:none">{{content}}</div>
+    <div id="content" style="display:none">{{crypted}}</div>
   </body>
 </html>

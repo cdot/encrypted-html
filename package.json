@@ -10,12 +10,14 @@
     "eslint-formatter-unix": "^9.0.1",
     "globals": "^17.14.0",
     "html-minifier": "^5.4.0",
+    "lightningcss": "^1.33.0",
     "mocha": "^12.0.3",
     "terser": "^5.51.3"
   },
   "scripts": {
     "test": "mocha --recursive --extension test.js --timeout=5000 test",
     "lint": "eslint src -f unix",
-    "build": "node build.js"
+    "production": "node build.js production",
+    "debug": "node build.js debug"
   }
 }

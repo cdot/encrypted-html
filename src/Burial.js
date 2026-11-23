@@ -1,103 +1,271 @@
-/**
- * This is the master source used in appscript, browser, and in node.js
- * START_BROWSER..END_BROWSER demarcates browser-specific code
- * START_ENCODE..END_ENCODE demarcates code that is only used in encryption
- */
+/* global Utilities, Buffer */
 
 /**
- * Encryption and decryption with support for expiry dates.
+ * //START_ENCRYPT...//END_ENCRYPT sections can be stripped out if you
+ * only need decryption
  */
-function Burial() { 
-  // ES3-style class that uglifies nicely.
+const Burial = (function() {
 
-  // Chars valid in base 64
-  const B64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-
-  //START_ENCODE
   /**
-   * Encode an array of byte integers (0..255) into a base 64 string.
-   * @param {Uint8Array|[]} numbers array of bytes to encode
-   * @return {string} a base 64 string
+   * untangling the mess of bto and atob and base64 handling
+   * on different platforms
    */
-  function BtoA(numbers) {
-    let out = '';
-    const len = numbers.length;
 
-    for (let i = 0; i < len; i += 3) {
-      const b0 = numbers[i];
-      if (!Number.isInteger(b0) || b0 < 0 || b0 > 255)
-        throw new RangeError(
-          `Expected byte in 0..255 at index ${i}, got ${b0}`);
+  const hasAppsScript =
+    typeof Utilities !== "undefined" &&
+    typeof Utilities.newBlob === "function" &&
+    typeof Utilities.base64Encode === "function" &&
+    typeof Utilities.base64Decode === "function";
 
-      const hasB1 = i + 1 < len;
-      const hasB2 = i + 2 < len;
-      const b1 = hasB1 ? numbers[i + 1] : 0;
-      const b2 = hasB2 ? numbers[i + 2] : 0;
+  const hasBuffer = typeof Buffer !== "undefined";
+  const hasTextEncoder = typeof TextEncoder !== "undefined";
+  const hasTextDecoder = typeof TextDecoder !== "undefined";
 
-      if (hasB1 && (!Number.isInteger(b1) || b1 < 0 || b1 > 255))
-        throw new RangeError(
-          `Expected byte in 0..255 at index ${i + 1}, got ${b1}`);
-      if (hasB2 && (!Number.isInteger(b2) || b2 < 0 || b2 > 255))
-        throw new RangeError(
-          `Expected byte in 0..255 at index ${i + 2}, got ${b2}`);
+  /**
+   * Encode a js string into a utf-8 Uint8Array.
+   */
+  function utf8Encode(str) {
+    const input = String(str);
+    let bytes;
 
-      const triple = (b0 << 16) | (b1 << 8) | b2;
+    if (hasTextEncoder)
+      bytes = new TextEncoder().encode(input);
 
-      out += B64_CHARS[(triple >>> 18) & 0x3f];
-      out += B64_CHARS[(triple >>> 12) & 0x3f];
-      out += hasB1 ? B64_CHARS[(triple >>> 6) & 0x3f] : '=';
-      out += hasB2 ? B64_CHARS[triple & 0x3f] : '=';
+    else if (hasBuffer) {
+      const buf = Buffer.from(input, "utf8");
+      bytes = new Uint8Array(buf.Buffer, buf.byteoffset, buf.bytelength);
+    }
+
+    else if (hasAppsScript) {
+      // Utilities.newBlob(string, contenttype, charset).getbytes()
+      // returns signed bytes (-128..127)
+      const signed = Utilities.newBlob(input, "text/plain", "utf-8").getBytes();
+      bytes = new Uint8Array(signed.length);
+      for (let i = 0; i < signed.length; i++)
+        bytes[i] = signed[i] < 0 ? signed[i] + 256 : signed[i];
+    }
+
+    else { // pure js fallback (handles astral plane / surrogate pairs)
+      bytes = [];
+      for (let i = 0; i < input.length; i++) {
+        let codepoint = input.charCodeAt(i);
+        // handle utf-16 surrogate pairs (u+10000 to u+10ffff)
+        if (codepoint >= 0xd800 && codepoint <= 0xdbff && i + 1 < input.length) {
+          const next = input.charCodeAt(i + 1);
+          if (next >= 0xdc00 && next <= 0xdfff) {
+            codepoint = 0x10000 + ((codepoint - 0xd800) << 10) + (next - 0xdc00);
+            i++;
+          }
+        }
+
+        if (codepoint <= 0x7f) {
+          bytes.push(codepoint);
+        } else if (codepoint <= 0x7ff) {
+          bytes.push(0xc0 | (codepoint >> 6), 0x80 | (codepoint & 0x3f));
+        } else if (codepoint <= 0xffff) {
+          bytes.push(
+            0xe0 | (codepoint >> 12),
+            0x80 | ((codepoint >> 6) & 0x3f),
+            0x80 | (codepoint & 0x3f)
+          );
+        } else {
+          bytes.push(
+            0xf0 | (codepoint >> 18),
+            0x80 | ((codepoint >> 12) & 0x3f),
+            0x80 | ((codepoint >> 6) & 0x3f),
+            0x80 | (codepoint & 0x3f)
+          );
+        }
+      }
+      bytes = new Uint8Array(bytes);
+    }
+
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++)
+      binary += String.fromCharCode(bytes[i]);
+    return binary;
+  }
+
+  /**
+   * Decode utf-8 bytes (Uint8Array, Array<number>, or binary string)
+   * into a js string.
+   */
+  function utf8Decode(input) {
+    let bytes;
+    if (typeof input === "string") {
+      bytes = new Uint8Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        const code = input.charCodeAt(i);
+        //START_PARANOID
+        if (code > 0xff)
+          throw new Error("string input must contain byte values 0x00-0xff.");
+        //END_PARANOID
+        bytes[i] = code;
+      }
+    } else if (input instanceof Uint8Array) {
+      bytes = input;
+    } else if (Array.isarray(input)) {
+      bytes = new Uint8Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        bytes[i] = input[i] < 0 ? input[i] + 256 : input[i];
+      }
+    }
+    //START_PARANOID
+    else {
+      throw new TypeError("expected Uint8Array, number[], or binary string.");
+    }
+    //END_PARANOID
+
+    if (hasTextDecoder) {
+      return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    }
+
+    if (hasBuffer) {
+      return Buffer.from(bytes.Buffer, bytes.byteoffset, bytes.bytelength).toString("utf8");
+    }
+
+    if (hasAppsScript) {
+      const signed = new Array(bytes.length);
+      for (let i = 0; i < bytes.length; i++) {
+        signed[i] = bytes[i] > 127 ? bytes[i] - 256 : bytes[i];
+      }
+      return Utilities.newBlob(signed).getDataAsString("utf-8");
+    }
+
+    // pure js fallback
+    let out = "";
+    let i = 0;
+    while (i < bytes.length) {
+      const b0 = bytes[i];
+
+      if (b0 <= 0x7f) {
+        out += String.fromCharCode(b0);
+        i += 1;
+      } else if (b0 >= 0xc2 && b0 <= 0xdf && i + 1 < bytes.length) {
+        const b1 = bytes[i + 1];
+        //START_PARANOID
+        if ((b1 & 0xc0) !== 0x80)
+          throw new Error("invalid utf-8 continuation byte");
+        //END_PARANOID
+        out += String.fromCharCode(((b0 & 0x1f) << 6) | (b1 & 0x3f));
+        i += 2;
+      } else if (b0 >= 0xe0 && b0 <= 0xef && i + 2 < bytes.length) {
+        const b1 = bytes[i + 1];
+        const b2 = bytes[i + 2];
+        //START_PARANOID
+        if ((b1 & 0xc0) !== 0x80 || (b2 & 0xc0) !== 0x80)
+          throw new Error("invalid utf-8 continuation byte");
+        // reject overlong encodings and utf-16 surrogates (u+d800..u+dfff)
+        if (b0 === 0xe0 && b1 < 0xa0)
+          throw new Error("overlong 3-byte utf-8 sequence");
+        if (b0 === 0xed && b1 >= 0xa0)
+          throw new Error("invalid utf-8 surrogate code point");
+        //END_PARANOID
+        
+        out += String.fromCharCode(
+          ((b0 & 0x0f) << 12) | ((b1 & 0x3f) << 6) | (b2 & 0x3f)
+        );
+        i += 3;
+      } else if (b0 >= 0xf0 && b0 <= 0xf4 && i + 3 < bytes.length) {
+        const b1 = bytes[i + 1];
+        const b2 = bytes[i + 2];
+        const b3 = bytes[i + 3];
+        //START_PARANOID
+        if ((b1 & 0xc0) !== 0x80 || (b2 & 0xc0) !== 0x80 || (b3 & 0xc0) !== 0x80)
+          throw new Error("invalid utf-8 continuation byte");
+        if (b0 === 0xf0 && b1 < 0x90)
+          throw new Error("overlong 4-byte utf-8 sequence");
+        if (b0 === 0xf4 && b1 > 0x8f)
+          throw new Error("utf-8 code point above u+10ffff");
+        //END_PARANOID
+
+        const codepoint =
+          ((b0 & 0x07) << 18) |
+          ((b1 & 0x3f) << 12) |
+          ((b2 & 0x3f) << 6) |
+          (b3 & 0x3f);
+        const shifted = codepoint - 0x10000;
+        out += String.fromCharCode(0xd800 + (shifted >> 10), 0xdc00 + (shifted & 0x3ff));
+        i += 4;
+      }
+      //START_PARANOID
+      else
+        throw new Error("invalid utf-8 byte sequence");
+      //END_PARANOID
     }
 
     return out;
   }
-  this.BtoA = BtoA;
-  //END_ENCODE
 
+  //START_ENCRYPT
   /**
-   * Decodes a Base64 string produced by BtoA back into an array
-   * of byte numbers (0..255). Works identically in Node.js, browsers,
-   * and Google Apps Script.
+   * Encode a binary/latin-1 string (each char code 0-255) to base64.
    */
-  function AtoB(base64) {
-    //START_ENCODE
-    if (typeof base64 !== 'string') {
-      throw new TypeError('Expected a Base64 string');
+  function latin1ToBase64(str) {
+    const input = String(str);
+
+    if (hasAppsScript) {
+      const bytes = [];
+      for (let i = 0; i < input.length; i++) {
+        const code = input.charCodeAt(i);
+        //START_PARANOID
+        if (code > 0xff)
+          throw new Error("latin1ToBase64: character out of latin-1 range (0x00-0xff)");
+        //END_PARANOID
+        
+        // apps script expects signed bytes (-128 to 127)
+        bytes.push(code > 127 ? code - 256 : code);
+      }
+      return Utilities.base64Encode(bytes);
     }
-    //END_ENCODE
 
-    const clean = base64.replace(/\s+/g, '');
-    if (clean.length === 0)
-      return [];
+    if (typeof globalThis.btoa === "function")
+      return globalThis.btoa(input);
 
-    //START_ENCODE
-    if (clean.length % 4 !== 0) {
-      throw new RangeError('Invalid Base64 length');
+    if (hasBuffer) {
+      for (let i = 0; i < input.length; i++) {
+        //START_PARANOID
+        if (input.charCodeAt(i) > 0xff)
+          throw new Error("latin1ToBase64: character out of latin-1 range (0x00-0xff)");
+        //END_PARAMOID
+      }
+      return Buffer.from(input, "latin1").toString("base64");
     }
-    //END_ENCODE
 
-    let arr = [];
-    for (let i = 0; i < clean.length; i = i + 4) {
-      const c0 = B64_CHARS.indexOf(clean.charAt(i)),
-            c1 = B64_CHARS.indexOf(clean.charAt(i + 1)),
-            c2 = B64_CHARS.indexOf(clean.charAt(i + 2)),
-            c3 = B64_CHARS.indexOf(clean.charAt(i + 3));
-
-      const b0 = (c0 << 2) | (c1 >> 4),
-            b1 = ((c1 & 15) << 4) | (c2 >> 2),
-            b2 = ((c2 & 3) << 6) | c3;
-
-      arr.push(b0, b1, b2);
-    }
-    // assumes the content is a multiple of 16 long - which is OK for our purposes
-    arr = arr.slice(0, arr.length - (arr.length % 16));
-    return arr;
+    throw new Error("No supported base64 encoder found");
   }
-  this.AtoB = AtoB;
+  //END_ENCRYPT
 
   /**
-   * Split a 64-bit value into 8 unsigned bytes in an array.
-   * @param {number} long 64-bit number e.g. Date.getTime()
+   * Decode a base64 string to a binary/latin-1 string (each char code 0-255).
+   */
+  function base64ToLatin1(str) {
+    const input = String(str).replace(/[\s=]+$/, (match) => match); // preserve padding for validation
+
+    if (hasAppsScript) {
+      const bytes = Utilities.base64Decode(input);
+      let out = "";
+      for (let i = 0; i < bytes.length; i++) {
+        // convert signed byte (-128 to 127) to unsigned (0 to 255)
+        const unsigned = bytes[i] < 0 ? bytes[i] + 256 : bytes[i];
+        out += String.fromCharCode(unsigned);
+      }
+      return out;
+    }
+
+    if (typeof globalThis.atob === "function")
+      return globalThis.atob(input);
+
+    if (hasBuffer)
+      return Buffer.from(input, "base64").toString("latin1");
+
+    throw new Error("No supported base64 decoder found");
+  }
+
+  //START_ENCRYPT
+  /**
+   * split a 64-bit value into 8 unsigned bytes in an array.
+   * @param {number} long 64-bit number e.g. date.gettime()
    * @param {Uint8Array?} bytes optional array to populate
    * @param {number?} offset offset in `bytes` to write, defaults to 0
    * @return {Uint8Array} `bytes` if it's passed in, or a new 8-element
@@ -109,16 +277,17 @@ function Burial() {
       offset = 0;
     }
     for (let i = 0; i < 8; i++) {
-      // Because bitwise ops in JS convert everything to a 32 bit
+      // because bitwise ops in js convert everything to a 32 bit
       // value we use arithmetic ops.
       bytes[offset + i] = long % 256;
       long = Math.floor(long / 256);
     }
     return bytes;
   }
+  //END_ENCRYPT
 
   /**
-   * Combine the 8 elements of a byte array into a 64-bit number. The
+   * combine the 8 elements of a byte array into a 64-bit number. the
    * bytes will have been placed there by `long2bytes`.
    * @param {Uint8Array} 8-element array
    * @param {number?} offset offset in `bytes` to read, defaults to 0
@@ -127,533 +296,390 @@ function Burial() {
   function bytes2long(bytes, offset = 0) {
     let long = 0;
     for (let i = 7; i >= 0; i--) {
-      // Because bitwise ops in JS convert everything to a 32 bit
+      // because bitwise ops in js convert everything to a 32 bit
       // value we use arithmetic ops.
       long = long * 256 + bytes[offset + i];
     }
     return long;
   }
 
-  /* DEBUG - consistency between runs of the encryption*/
-     let nextrand = 0;
-     Math.random = () => nextrand++ / 1000;
-  /**/
+  // constants for 256-bit aes have been expanded out:
+  // nbits = 256 bits in key
+  // nbytes = nbits / 8 = 32 bytes in key
+  // blocksize fixed at 16 bytes / 128 bits (nb=4) for aes
+  // nb = 4 block size (in words): no of columns in state (fixed at 4 for aes)
+  // nr = 14 no of rounds: 14 for 256-bit keys
+  // nk = 8 for 256-bit keys
 
-  // 256 bit CBC encryption
-  const NR = 14, NK = 8;
+  /**
+   * aes (rijndael cipher) encryption, from chris veness on github. fixed for
+   * 256 bit key, and with password expiry date added
+   */
 
-  function strhex(str, size) {
-    const ret = [];
-    for (let i = 0; i < str.length; i += size)
-      ret[i / size] = parseInt(str.substr(i, size), 16);
-    return ret;
+  /**
+   * aes cipher function: encrypt 'input' state with rijndael algorithm [§5.1];
+   * applies nr rounds (14 for 256-bit keys) using key schedule w for
+   * 'add round key' stage.
+   * @param  {number[]} input - 16-byte (128-bit) input state array.
+   * @param  {number[][]} w - key schedule as 2d byte-array
+   * (nr+1 x nb = 60 bytes for 256-bit key).
+   * @return {number[]} encrypted 16 element state array.
+   * @private
+   */
+  function cipher(input, w) {
+    // initialise 4 x Nb byte-array 'state' with input [§3.4]
+    let state = [ [], [], [], [] ];
+    for (let i = 0; i < 4 * /*Nb*/4; i++)
+      state[i % 4][Math.floor(i / 4)] = input[i];
+
+    state = addRoundKey(state, w, 0);
+
+    for (let round = 1; round < /*Nr*/14; round++) {
+      state = subBytes(state);
+      state = shiftRows(state);
+      state = mixColumns(state);
+      state = addRoundKey(state, w, round);
+    }
+
+    state = subBytes(state);
+    state = shiftRows(state);
+    state = addRoundKey(state, w, /*Nr*/14);
+
+    return state.flat();
+  };
+
+  /**
+   * Use AES to encrypt password
+   * @param {string} password utf8 encoded password
+   */
+  function makeKey(password) {
+    const pwBytes = new Array(/*nBytes*/32);
+    for (let i = 0; i < /*nBytes*/32; i++) {
+      pwBytes[i] = isNaN(password.charCodeAt(i))
+      ? 0 : password.charCodeAt(i);
+    }
+    let key = cipher(pwBytes, keyExpansion(pwBytes));
+    // expand key to 32 bytes long
+    return key.concat(key);
   }
+  
+  /**
+   * Perform key expansion to generate a key schedule from a cipher key [§5.2].
+   * @param {number[]} key - Cipher key as 32-byte array
+   * @return {number[][]} Expanded key schedule as 2D byte-array
+   * (Nr+1 x Nb = 60 bytes for 256 bit key)
+   * @private
+   */
+  function keyExpansion(key) {
+    const w = new Array(/*Nb*/4 * (/*Nr*/14 + 1));
+    let temp = new Array(4);
 
-  const RND = strhex('67452301efcdab8998badcfe10325476d76aa478e8c7b756242070dbc1bdceeef57c0faf4787c62aa8304613fd469501698098d88b44f7afffff5bb1895cd7be6b901122fd987193a679438e49b40821f61e2562c040b340265e5a51e9b6c7aad62f105d02441453d8a1e681e7d3fbc821e1cde6c33707d6f4d50d87455a14eda9e3e905fcefa3f8676f02d98d2a4c8afffa39428771f6816d9d6122fde5380ca4beea444bdecfa9f6bb4b60bebfbc70289b7ec6eaa127fad4ef308504881d05d9d4d039e6db99e51fa27cf8c4ac5665f4292244432aff97ab9423a7fc93a039655b59c38f0ccc92ffeff47d85845dd16fa87e4ffe2ce6e0a30143144e0811a1f7537e82bd3af2352ad7d2bbeb86d391', 8);
-
-  function MD5(numArr) {
-    function rotateLeft(lValue, iShiftBits) {
-      return (lValue << iShiftBits) | (lValue >>> (32 - iShiftBits));
+    // initialise first Nk words of expanded key with cipher key
+    for (let i = 0; i < /*Nk*/8; i++) {
+      const r = [key[4 * i], key[4 * i + 1], key[4 * i + 2], key[4 * i + 3]];
+      w[i] = r;
     }
 
-    function addUnsigned(lX, lY) {
-      const lX8 = (lX & 0x80000000);
-      const lY8 = (lY & 0x80000000);
-      const lX4 = (lX & 0x40000000);
-      const lY4 = (lY & 0x40000000);
-      const lResult = (lX & 0x3FFFFFFF) + (lY & 0x3FFFFFFF);
-      if (lX4 & lY4)
-        return (lResult ^ 0x80000000 ^ lX8 ^ lY8);
-      if (lX4 | lY4)
-        return (lResult & 0x40000000)
-      ? (lResult ^ 0xC0000000 ^ lX8 ^ lY8)
-      : (lResult ^ 0x40000000 ^ lX8 ^ lY8);
-      return (lResult ^ lX8 ^ lY8);
-    }
-
-    const f = (x, y, z) => (x & y) | ((~x) & z);
-    const g = (x, y, z) => (x & z) | (y & (~z));
-    const h = (x, y, z) => (x ^ y ^ z);
-    const funcI = (x, y, z) => (y ^ (x | (~z)));
-
-    function ff(a, b, c, d, x, s, ac) {
-      a = addUnsigned(a, addUnsigned(addUnsigned(f(b, c, d), x), ac));
-      return addUnsigned(rotateLeft(a, s), b);
-    }
-
-    function gg(a, b, c, d, x, s, ac) {
-      a = addUnsigned(a, addUnsigned(addUnsigned(g(b, c, d), x), ac));
-      return addUnsigned(rotateLeft(a, s), b);
-    }
-
-    function hh(a, b, c, d, x, s, ac) {
-      a = addUnsigned(a, addUnsigned(addUnsigned(h(b, c, d), x), ac));
-      return addUnsigned(rotateLeft(a, s), b);
-    }
-
-    function ii(a, b, c, d, x, s, ac) {
-      a = addUnsigned(a, addUnsigned(addUnsigned(funcI(b, c, d), x), ac));
-      return addUnsigned(rotateLeft(a, s), b);
-    }
-
-    function convertToWordArray(numArr) {
-      const lMessageLength = numArr.length;
-      const lNumberOfWords_temp1 = lMessageLength + 8;
-      const lNumberOfWords_temp2 = (lNumberOfWords_temp1 - (lNumberOfWords_temp1 % 64)) / 64;
-      const lNumberOfWords = (lNumberOfWords_temp2 + 1) * 16;
-      const lWordArray = [];
-      let lWordCount;
-      let lBytePosition;
-      let lByteCount = 0;
-      while (lByteCount < lMessageLength) {
-        lWordCount = (lByteCount - (lByteCount % 4)) / 4;
-        lBytePosition = (lByteCount % 4) * 8;
-        lWordArray[lWordCount] = (lWordArray[lWordCount] | (numArr[lByteCount] << lBytePosition));
-        lByteCount++;
-      }
-      lWordCount = (lByteCount - (lByteCount % 4)) / 4;
-      lBytePosition = (lByteCount % 4) * 8;
-      lWordArray[lWordCount] = lWordArray[lWordCount] | (0x80 << lBytePosition);
-      lWordArray[lNumberOfWords - 2] = lMessageLength << 3;
-      lWordArray[lNumberOfWords - 1] = lMessageLength >>> 29;
-      return lWordArray;
-    }
-
-    function wordToHex(lValue) {
-      let lByte;
-      const wordToHexArr = [];
-      for (let lCount = 0; lCount <= 3; lCount++) {
-        lByte = (lValue >>> (lCount * 8)) & 255;
-        wordToHexArr[lCount] = lByte;
-      }
-      return wordToHexArr;
-    }
-
-    const x = convertToWordArray(numArr);
-    
-    let a = RND[0];
-    let b = RND[1];
-    let c = RND[2];
-    let d = RND[3];
-
-    for (let k = 0; k < x.length; k += 16) {
-      const AA = a;
-      const BB = b;
-      const CC = c;
-      const DD = d;
-      a = ff(a, b, c, d, x[k + 0], 7, RND[4]);
-      d = ff(d, a, b, c, x[k + 1], 12, RND[5]);
-      c = ff(c, d, a, b, x[k + 2], 17, RND[6]);
-      b = ff(b, c, d, a, x[k + 3], 22, RND[7]);
-      a = ff(a, b, c, d, x[k + 4], 7, RND[8]);
-      d = ff(d, a, b, c, x[k + 5], 12, RND[9]);
-      c = ff(c, d, a, b, x[k + 6], 17, RND[10]);
-      b = ff(b, c, d, a, x[k + 7], 22, RND[11]);
-      a = ff(a, b, c, d, x[k + 8], 7, RND[12]);
-      d = ff(d, a, b, c, x[k + 9], 12, RND[13]);
-      c = ff(c, d, a, b, x[k + 10], 17, RND[14]);
-      b = ff(b, c, d, a, x[k + 11], 22, RND[15]);
-      a = ff(a, b, c, d, x[k + 12], 7, RND[16]);
-      d = ff(d, a, b, c, x[k + 13], 12, RND[17]);
-      c = ff(c, d, a, b, x[k + 14], 17, RND[18]);
-      b = ff(b, c, d, a, x[k + 15], 22, RND[19]);
-      a = gg(a, b, c, d, x[k + 1], 5, RND[20]);
-      d = gg(d, a, b, c, x[k + 6], 9, RND[21]);
-      c = gg(c, d, a, b, x[k + 11], 14, RND[22]);
-      b = gg(b, c, d, a, x[k + 0], 20, RND[23]);
-      a = gg(a, b, c, d, x[k + 5], 5, RND[24]);
-      d = gg(d, a, b, c, x[k + 10], 9, RND[25]);
-      c = gg(c, d, a, b, x[k + 15], 14, RND[26]);
-      b = gg(b, c, d, a, x[k + 4], 20, RND[27]);
-      a = gg(a, b, c, d, x[k + 9], 5, RND[28]);
-      d = gg(d, a, b, c, x[k + 14], 9, RND[29]);
-      c = gg(c, d, a, b, x[k + 3], 14, RND[30]);
-      b = gg(b, c, d, a, x[k + 8], 20, RND[31]);
-      a = gg(a, b, c, d, x[k + 13], 5, RND[32]);
-      d = gg(d, a, b, c, x[k + 2], 9, RND[33]);
-      c = gg(c, d, a, b, x[k + 7], 14, RND[34]);
-      b = gg(b, c, d, a, x[k + 12], 20, RND[35]);
-      a = hh(a, b, c, d, x[k + 5], 4, RND[36]);
-      d = hh(d, a, b, c, x[k + 8], 11, RND[37]);
-      c = hh(c, d, a, b, x[k + 11], 16, RND[38]);
-      b = hh(b, c, d, a, x[k + 14], 23, RND[39]);
-      a = hh(a, b, c, d, x[k + 1], 4, RND[40]);
-      d = hh(d, a, b, c, x[k + 4], 11, RND[41]);
-      c = hh(c, d, a, b, x[k + 7], 16, RND[42]);
-      b = hh(b, c, d, a, x[k + 10], 23, RND[43]);
-      a = hh(a, b, c, d, x[k + 13], 4, RND[44]);
-      d = hh(d, a, b, c, x[k + 0], 11, RND[45]);
-      c = hh(c, d, a, b, x[k + 3], 16, RND[46]);
-      b = hh(b, c, d, a, x[k + 6], 23, RND[47]);
-      a = hh(a, b, c, d, x[k + 9], 4, RND[48]);
-      d = hh(d, a, b, c, x[k + 12], 11, RND[49]);
-      c = hh(c, d, a, b, x[k + 15], 16, RND[50]);
-      b = hh(b, c, d, a, x[k + 2], 23, RND[51]);
-      a = ii(a, b, c, d, x[k + 0], 6, RND[52]);
-      d = ii(d, a, b, c, x[k + 7], 10, RND[53]);
-      c = ii(c, d, a, b, x[k + 14], 15, RND[54]);
-      b = ii(b, c, d, a, x[k + 5], 21, RND[55]);
-      a = ii(a, b, c, d, x[k + 12], 6, RND[56]);
-      d = ii(d, a, b, c, x[k + 3], 10, RND[57]);
-      c = ii(c, d, a, b, x[k + 10], 15, RND[58]);
-      b = ii(b, c, d, a, x[k + 1], 21, RND[59]);
-      a = ii(a, b, c, d, x[k + 8], 6, RND[60]);
-      d = ii(d, a, b, c, x[k + 15], 10, RND[61]);
-      c = ii(c, d, a, b, x[k + 6], 15, RND[62]);
-      b = ii(b, c, d, a, x[k + 13], 21, RND[63]);
-      a = ii(a, b, c, d, x[k + 4], 6, RND[64]);
-      d = ii(d, a, b, c, x[k + 11], 10, RND[65]);
-      c = ii(c, d, a, b, x[k + 2], 15, RND[66]);
-      b = ii(b, c, d, a, x[k + 9], 21, RND[67]);
-      a = addUnsigned(a, AA);
-      b = addUnsigned(b, BB);
-      c = addUnsigned(c, CC);
-      d = addUnsigned(d, DD);
-    }
-
-    return wordToHex(a).concat(wordToHex(b), wordToHex(c), wordToHex(d));
-  }
-
-  function openSSLKey(passwordArr, saltArr) {
-    // Number of rounds depends on the size of the AES in use
-    // 3 rounds for 256
-    //        2 rounds for the key, 1 for the IV
-    // 2 rounds for 128
-    //        1 round for the key, 1 round for the IV
-    // 3 rounds for 192 since it's not evenly divided by 128 bits
-    const rounds = NR >= 12 ? 3 : 2;
-    const data00 = passwordArr.concat(saltArr);
-    const md5_hash = [ MD5(data00) ];
-    let result = md5_hash[0];
-    for (let i = 1; i < rounds; i++) {
-      md5_hash[i] = MD5(md5_hash[i - 1].concat(data00));
-      result = result.concat(md5_hash[i]);
-    }
-    const key = result.slice(0, 4 * NK);
-    const iv = result.slice(4 * NK, 4 * NK + 16);
-    return {
-      key: key,
-      iv: iv
-    };
-  }
-
-  function invertArr(arr) {
-    const ret = [];
-    for (let i = 0; i < arr.length; i++)
-      ret[arr[i]] = i;
-    return ret;
-  }
-
-  const SBOX = strhex('637c777bf26b6fc53001672bfed7ab76ca82c97dfa5947f0add4a2af9ca472c0b7fd9326363ff7cc34a5e5f171d8311504c723c31896059a071280e2eb27b27509832c1a1b6e5aa0523bd6b329e32f8453d100ed20fcb15b6acbbe394a4c58cfd0efaafb434d338545f9027f503c9fa851a3408f929d38f5bcb6da2110fff3d2cd0c13ec5f974417c4a77e3d645d197360814fdc222a908846eeb814de5e0bdbe0323a0a4906245cc2d3ac629195e479e7c8376d8dd54ea96c56f4ea657aae08ba78252e1ca6b4c6e8dd741f4bbd8b8a703eb5664803f60e613557b986c11d9ee1f8981169d98e949b1e87e9ce5528df8ca1890dbfe6426841992d0fb054bb16',2);
-
-  const RCON = strhex('01020408102040801b366cd8ab4d9a2f5ebc63c697356ad4b37dfaefc591',2);
-
-  const SBOXINV = invertArr(SBOX);
-
-  function Gx(x) {
-    
-    function Gxx(a, b) {
-      let ret = 0;
-      for (let i = 0; i < 8; i++) {
-        ret = ((b & 1) === 1) ? ret ^ a : ret;
-        /* xmult */
-        a = (a > 0x7f) ? 0x11b ^ (a << 1) : (a << 1);
-        b >>>= 1;
-      }
-      return ret;
-    }
-
-    const r = [];
-    for (let i = 0; i < 256; i++)
-      r[i] = Gxx(x, i);
-    return r;
-  }
-
-  const G2X = Gx(2);
-  const G3X = Gx(3);
-  const G9X = Gx(9);
-  const GBX = Gx(0xb);
-  const GDX = Gx(0xd);
-  const GEX = Gx(0xe);
-
-  function expandKey(key) {
-    // Expects a 1d number array
-
-    function subWord(w) {
-      // apply SBox to 4-byte word w
-      for (let i = 0; i < 4; i++)
-        w[i] = SBOX[w[i]];
-      return w;
-    }
-
-    function rotWord(w) {
-      // rotate 4-byte word w left by one byte
-      let tmp = w[0];
-      for (let i = 0; i < 3; i++)
-        w[i] = w[i + 1];
-      w[3] = tmp;
-      return w;
-    }
-
-    const w = [];
-    let temp = [];
-    const flat = [];
-
-    for (let i = 0; i < NK; i++)
-      w[i] = [key[4 * i], key[4 * i + 1], key[4 * i + 2], key[4 * i + 3]];
-
-    for (let i = NK; i < (4 * (NR + 1)); i++) {
-      w[i] = [];
-      let t;
-      for (t = 0; t < 4; t++)
+    // expand the key into the remainder of the schedule
+    for (let i = /*Nk*/8; i < (/*Nb*/4 * (/*Nr*/14 + 1)); i++) {
+      w[i] = new Array(4);
+      for (let t = 0; t < 4; t++)
         temp[t] = w[i - 1][t];
-      if (i % NK === 0) {
+      // each Nk'th word has extra transformation
+      if (i % /*Nk*/8 == 0) {
         temp = subWord(rotWord(temp));
-        temp[0] ^= RCON[i / NK - 1];
-      } else if (NK > 6 && i % NK === 4) {
+        for (let t = 0; t < 4; t++)
+          temp[t] ^= rCon[i / /*Nk*/8][t];
+      }
+      // 256-bit key has subWord applied every 4th word
+      else if (/*Nk > 6 &&*/ i % /*Nk*/8 == 4) {
         temp = subWord(temp);
       }
-      for (t = 0; t < 4; t++)
-        w[i][t] = w[i - NK][t] ^ temp[t];
-    }
-    for (let i = 0; i < (NR + 1); i++) {
-      flat[i] = [];
-      for (let j = 0; j < 4; j++)
-        for (let k = 0; k < 4; k++)
-          flat[i].push(w[i * 4 + j][k]);
-    }
-    return flat;
-  }
-
-  function xorBlocks(block1, block2) {
-    const temp = [];
-    for (let i = 0; i < 16; i++)
-      temp[i] = block1[i] ^ block2[i];
-    return temp;
-  }
-
-  function addRoundKey(state, words, round) {
-    const temp = [];
-    for (let i = 0; i < 16; i++)
-      temp[i] = state[i] ^ words[round][i];
-    return temp;
-  }
-
-  function subBytes(state, S) {
-    const temp = [];
-    for (let i = 0; i < 16; i++)
-      temp[i] = S[state[i]];
-    return temp;
-  }
-
-  function shiftRows(state, shiftBy) {
-    const temp = [];
-    for (let i = 0; i < 16; i++)
-      temp[i] = state[shiftBy[i]];
-    return temp;
-  }
-
-  //START_ENCODE
-  function encryptBlock(block, words) {
-    let state = addRoundKey(block, words, 0);
-    for (let round = 1; round < (NR + 1); round++) {
-      state = subBytes(state, SBOX);
-      state = shiftRows(
-        state, [0, 5, 10, 15, 4, 9, 14, 3, 8, 13, 2, 7, 12, 1, 6, 11]);
-      if (round < NR)
-        state = mixColumnsE(state);
-      //last round? don't mixColumns
-      state = addRoundKey(state, words, round);
+      // xor w[i] with w[i-1] and w[i-Nk]
+      for (let t = 0; t < 4; t++)
+        w[i][t] = w[i - /*Nk*/8][t] ^ temp[t];
     }
 
-    return state;
+    return w;
   }
 
-  function rawEncrypt(plaintext, key, iv) {
-    function padBlock(byteArr)    {
-      let array = [];
-      if (byteArr.length < 16) {
-        const cpad = 16 - byteArr.length;
-        array = [cpad, cpad, cpad, cpad, cpad, cpad, cpad, cpad,
-                 cpad, cpad, cpad, cpad, cpad, cpad, cpad, cpad];
-      }
-      for (let i = 0; i < byteArr.length; i++)
-        array[i] = byteArr[i];
-      return array;
-    }
-
-    // plaintext, key and iv as byte arrays
-    key = expandKey(key);
-    const numBlocks = Math.ceil(plaintext.length / 16);
-    const blocks = [];
-    const cipherBlocks = [];
-
-    for (let i = 0; i < numBlocks; i++)
-      blocks[i] = padBlock(plaintext.slice(i * 16, i * 16 + 16));
-
-    if (plaintext.length % 16 === 0)
-      blocks.push([16, 16, 16, 16, 16, 16, 16, 16,
-                   16, 16, 16, 16, 16, 16, 16, 16]);
-
-    for (let i = 0; i < blocks.length; i++) {
-      if (i === 0)
-        blocks[i] = xorBlocks(blocks[i], iv);
-      else
-        blocks[i] = xorBlocks(blocks[i], cipherBlocks[i - 1]);
-      cipherBlocks[i] = encryptBlock(blocks[i], key);
-    }
-    return cipherBlocks;
-  }
-  //END_ENCODE
-
-  function decryptBlock(block, words) {
-    let state = addRoundKey(block, words, NR);
-
-    for (let round = NR - 1; round > -1; round--) {
-      state = shiftRows(
-        state, [0, 13, 10, 7, 4, 1, 14, 11, 8, 5, 2, 15, 12, 9, 6, 3]);
-      state = subBytes(state, SBOXINV);
-      state = addRoundKey(state, words, round);
-      if (round > 0)
-        state = mixColumnsD(state);
-      //last round? don't mixColumns
-    }
-
-    return state;
-  }
-
-  function rawDecrypt(cryptArr, key, iv) {
-
-    function block2s(block, lastBlock)    {
-      let string = '', padding, i;
-      if (lastBlock) {
-        padding = block[15];
-        if (padding > 16)
-          throw new Error('Failed to decrypt');
-        if (padding === 16)
-          return '';
-        for (i = 0; i < 16 - padding; i++)
-          string += String.fromCharCode(block[i]);
-      } else {
-        for (i = 0; i < 16; i++)
-          string += String.fromCharCode(block[i]);
-      }
-      return string;
-    }
-
-    // cryptArr, key and iv as byte arrays
-    key = expandKey(key);
-    const cipherBlocks = [];
-    const plainBlocks = [];
-    const numBlocks = cryptArr.length / 16;
-    for (let i = 0; i < numBlocks; i++) {
-      cipherBlocks.push(cryptArr.slice(i * 16, (i + 1) * 16));
-    }
-
-    for (let i = cipherBlocks.length - 1; i >= 0; i--) {
-      plainBlocks[i] = decryptBlock(cipherBlocks[i], key);
-      plainBlocks[i] = (i === 0)
-      ? xorBlocks(plainBlocks[i], iv)
-      : xorBlocks(plainBlocks[i], cipherBlocks[i - 1]);
-    }
-    let string = '';
-    for (let i = 0; i < numBlocks - 1; i++)
-      string += block2s(plainBlocks[i], false);
-    string += block2s(plainBlocks[numBlocks - 1], true);
-    return decodeURIComponent(escape(string));
-  }
-
-  function mixColumnsE(state) {
-    const t = [];
-    for (let c = 0; c < 4; c++) {
-      t[c * 4] = G2X[state[c * 4]] ^ G3X[state[1 + c * 4]]
-      ^ state[2 + c * 4] ^ state[3 + c * 4];
-      t[1 + c * 4] = state[c * 4] ^ G2X[state[1 + c * 4]]
-      ^ G3X[state[2 + c * 4]] ^ state[3 + c * 4];
-      t[2 + c * 4] = state[c * 4] ^ state[1 + c * 4]
-      ^ G2X[state[2 + c * 4]] ^ G3X[state[3 + c * 4]];
-      t[3 + c * 4] = G3X[state[c * 4]] ^ state[1 + c * 4]
-      ^ state[2 + c * 4] ^ G2X[state[3 + c * 4]];
-    }
-    
-    return t;
-  }
-
-  function mixColumnsD(state) {
-    const t = [];
-    for (let c = 0; c < 4; c++) {
-      t[c*4] = GEX[state[c*4]] ^ GBX[state[1+c*4]]
-      ^ GDX[state[2+c*4]] ^ G9X[state[3+c*4]];
-      t[1+c*4] = G9X[state[c*4]] ^ GEX[state[1+c*4]]
-      ^ GBX[state[2+c*4]] ^ GDX[state[3+c*4]];
-      t[2+c*4] = GDX[state[c*4]] ^ G9X[state[1+c*4]]
-      ^ GEX[state[2+c*4]] ^ GBX[state[3+c*4]];
-      t[3+c*4] = GBX[state[c*4]] ^ GDX[state[1+c*4]]
-      ^ G9X[state[2+c*4]] ^ GEX[state[3+c*4]];
-    }
-    
-    return t;
-  }
-
-  function s2a(string) {
-    const array = [];
-    for (let i = 0; i < string.length; i++)
-      array[i] = string.charCodeAt(i);
-    return array;
-  }
-
-  //START_ENCODE
   /**
-   * @param {string} plain text to encrypt
-   * @param {string} pass encryption password
-   * @param {number} expires expiry time, in epoch ms
-   * @return {string} base 64 encoded encrypted string
+   * Apply SBox to state S [§5.1.1]
+   * @private
    */
-  this.encrypt = (plain, pass, expires = 9007199254740991) => {
-    const sig = long2bytes(expires);
-    const rand = [];
+  function subBytes(s) {
+    for (let r = 0; r < 4; r++) {
+      for (let c = 0; c < /*Nb*/4; c++)
+        s[r][c] = sBox[s[r][c]];
+    }
+    return s;
+  }
+  
+  /**
+   * Shift row r of state S left by r bytes [§5.1.2]
+   * @private
+   */
+  function shiftRows(s) {
+    const t = new Array(4);
+    for (let r = 1; r < 4; r++) {
+      for (let c = 0; c < 4; c++)
+        t[c] = s[r][(c + r) % /*Nb*/4];  // shift into temp copy
+      for (let c = 0; c < 4; c++)
+        s[r][c] = t[c]; // and copy back
+    }
+    return s;
+  }
+
+  /**
+   * Combine bytes of each col of state S [§5.1.3]
+   * @private
+   */
+  function mixColumns(s) {
+    for (let c = 0; c < 4; c++) {
+      const a = new Array(4);  // 'a' is a copy of the current column from 's'
+      const b = new Array(4);  // 'b' is a•{02} in GF(2^8)
+      for (let i = 0; i < 4; i++) {
+        a[i] = s[i][c];
+        b[i] = s[i][c] & 0x80 ? s[i][c] << 1 ^ 0x011b : s[i][c] << 1;
+      }
+      // a[n] ^ b[n] is a•{03} in GF(2^8)
+      s[0][c] = b[0] ^ a[1] ^ b[1] ^ a[2] ^ a[3]; // {02}•a0 + {03}•a1 + a2 + a3
+      s[1][c] = a[0] ^ b[1] ^ a[2] ^ b[2] ^ a[3]; // a0 • {02}•a1 + {03}•a2 + a3
+      s[2][c] = a[0] ^ a[1] ^ b[2] ^ a[3] ^ b[3]; // a0 + a1 + {02}•a2 + {03}•a3
+      s[3][c] = a[0] ^ b[0] ^ a[1] ^ a[2] ^ b[3]; // {03}•a0 + a1 + a2 + {02}•a3
+    }
+    return s;
+  }
+
+  /**
+   * Xor Round Key into state S [§5.1.4]
+   * @private
+   */
+  function addRoundKey(state, w, rnd) {
+    for (let r = 0; r < 4; r++) {
+      for (let c = 0; c < /*Nb*/4; c++)
+        state[r][c] ^= w[rnd * 4 + c][r];
+    }
+    return state;
+  }
+
+  /**
+   * Apply SBox to 4-byte word w
+   * @private
+   */
+  function subWord(w) {
+    for (let i = 0; i < 4; i++)
+      w[i] = sBox[w[i]];
+    return w;
+  }
+
+  /**
+   * Rotate 4-byte word w left by one byte
+   * @private
+   */
+  function rotWord(w) {
+    const tmp = w[0];
+    for (let i = 0; i < 3; i++)
+      w[i] = w[i + 1];
+    w[3] = tmp;
+    return w;
+  }
+
+  // sBox is pre-computed multiplicative inverse in GF(2^8) used in subBytes and keyExpansion [§5.1.1]
+  const sBox =  [
+    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,
+    0xab,0x76,0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,
+    0x9c,0xa4,0x72,0xc0,0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,
+    0xe5,0xf1,0x71,0xd8,0x31,0x15,0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,
+    0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,0x09,0x83,0x2c,0x1a,0x1b,0x6e,
+    0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,0x53,0xd1,0x00,0xed,
+    0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,0xd0,0xef,
+    0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,
+    0xf3,0xd2,0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,
+    0x64,0x5d,0x19,0x73,0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,
+    0xb8,0x14,0xde,0x5e,0x0b,0xdb,0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,
+    0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,0xe7,0xc8,0x37,0x6d,0x8d,0xd5,
+    0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,0xba,0x78,0x25,0x2e,
+    0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,0x70,0x3e,
+    0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,
+    0x28,0xdf,0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,
+    0xb0,0x54,0xbb,0x16];
+
+  // rCon is Round Constant used for the Key Expansion [1st col is 2^(r-1) in GF(2^8)] [§5.2]
+  const rCon = [
+    [0x00, 0x00, 0x00, 0x00],
+    [0x01, 0x00, 0x00, 0x00],
+    [0x02, 0x00, 0x00, 0x00],
+    [0x04, 0x00, 0x00, 0x00],
+    [0x08, 0x00, 0x00, 0x00],
+    [0x10, 0x00, 0x00, 0x00],
+    [0x20, 0x00, 0x00, 0x00],
+    [0x40, 0x00, 0x00, 0x00],
+    [0x80, 0x00, 0x00, 0x00],
+    [0x1b, 0x00, 0x00, 0x00],
+    [0x36, 0x00, 0x00, 0x00] ]; 
+
+  //START_ENCRYPT
+  /**
+   * Encrypt a Unicode string to produce a base64 ciphertext
+   * using 256-bit AES. Unicode multi-byte character safe
+   * @param {string} plaintext Source text to be encrypted.
+   * @param {string} password The password to use.
+   * @param {number} expires epoch ms when the pw expires, 0 for never
+   * (the default)
+   * @return {string} Encrypted text
+   */
+  function encrypt(plaintext, password, expires = 0) {
+
+    plaintext = utf8Encode(plaintext);
+    password = utf8Encode(password);
+
+    // use AES to encrypt password to get cipher key (using plain password
+    // as source for key expansion) - gives us a well encrypted key (though
+    // a hashed key might be preferred for prod'n use)
+    const pwBytes = new Array(/*nBytes*/32);
+    for (let i = 0; i < /*nBytes*/32; i++) {
+      // use 1st 16/24/32 chars of password for key
+      pwBytes[i] = isNaN(password.charCodeAt(i)) ? 0 : password.charCodeAt(i);
+    }
+    let key = cipher(pwBytes, keyExpansion(pwBytes)); // gives us 16-byte key
+    key = key.concat(key.slice(0, /*nBytes*/32 - 16)); // expand key to 16/24/32 bytes long
+
+    // initialise 1st 8 bytes of counter block with nonce
+    // (NIST SP800-38A §B.2): [0-1] = millisec, [2-3] = random,
+    // [4-7] = seconds, together giving full sub-millisec uniqueness
+    // up to Feb 2106
+    const counterBlock = new Array(/*blockSize*/16);
+    const nonce = (new Date()).getTime();
+    const nonceMs = nonce % 1000;
+    const nonceSec = Math.floor(nonce / 1000);
+    const nonceRnd = Math.floor(Math.random() * 0xffff);
+    // for debugging: nonce = nonceMs = nonceSec = nonceRnd = 0;
+    for (let i = 0; i < 2; i++)
+      counterBlock[i] = (nonceMs >>> i * 8) & 0xff;
+    for (let i = 0; i < 2; i++)
+      counterBlock[i+2] = (nonceRnd >>> i * 8) & 0xff;
+    for (let i = 0; i < 4; i++)
+      counterBlock[i + 4] = (nonceSec >>> i * 8) & 0xff;
+    // and convert it to a string to go on the front of the ciphertext
+    let preamble = '';
     for (let i = 0; i < 8; i++)
-      rand[i] = Math.floor(Math.random() * 256);
-    const salt = Array.from(sig).concat(rand);
-    const data = s2a(plain);
-    const pbe = openSSLKey(s2a(pass), rand);
-    const cipher = salt.concat(rawEncrypt(data, pbe.key, pbe.iv).flat());
-    return BtoA(cipher);
-  };
-  //END_ENCODE
+      preamble += String.fromCharCode(counterBlock[i]);
+
+    // Initialise next 8 bytes with the expiry time
+    const expa = long2bytes(expires);
+    for (let i = 0; i < 8; i++)
+      preamble += String.fromCharCode(expa[i]);
+
+    // generate key schedule - an expansion of the key into distinct
+    // Key Rounds for each round
+    const keySchedule = keyExpansion(key);
+
+    const blockCount = Math.ceil(plaintext.length / /*blockSize*/16);
+    const ciphertxt = new Array(blockCount); // ciphertext as array of strings
+
+    for (let b = 0; b < blockCount; b++) {
+      // set counter (block #) in last 8 bytes of counter block
+      // (leaving nonce in 1st 8 bytes) done in two stages for 32-bit
+      // ops: using two words allows us to go past 2^32 blocks (68GB)
+      for (let c = 0; c < 4; c++)
+        counterBlock[15 - c] = (b >>> c * 8) & 0xff;
+      for (let c = 0; c < 4; c++)
+        counterBlock[15 - c - 4] = (b / 0x100000000 >>> c * 8);
+
+      const cipherCntr = cipher(counterBlock, keySchedule); // -- encrypt counter block --
+
+      // block size is reduced on final block
+      const blockLength = b < blockCount - 1
+            ? /*blockSize*/16
+            : (plaintext.length - 1) % /*blockSize*/16 + 1;
+      const cipherChar = new Array(blockLength);
+
+      // xor plaintext with ciphered counter char-by-char
+      for (let i = 0; i < blockLength; i++) {
+        cipherChar[i] = cipherCntr[i] ^ plaintext.charCodeAt(b * /*blockSize*/16 + i);
+        cipherChar[i] = String.fromCharCode(cipherChar[i]);
+      }
+      ciphertxt[b] = cipherChar.join('');
+    }
+
+    return latin1ToBase64(preamble + ciphertxt.join(''));
+  }
+  //END_ENCRYPT
 
   /**
-   * @param {string} crypt base-64 encoded cipher to decrypt
-   * @param {string} pass encryption password
-   * @return {string} unencrypted text
+   * Decrypt a base64 encoded ciphertext to extract the original
+   * plain text. Unicode multi-byte character safe
+   * @param {string} ciphertext - Source text to be encrypted
+   * @param {string} password - Password to use to generate a key
+   * @return {string} Decrypted text
    */
-  this.decrypt = (crypt, pass) => {
-    // the +256 is because base64Encode/base64Decode are not symmetric
-    const cryptArr = AtoB(crypt);
-    // Get and check the expiry in the first 8 bytes
-    const expires = bytes2long(cryptArr);
+  function decrypt(ciphertext, password) {
+
+    ciphertext = base64ToLatin1(ciphertext);
+    password = utf8Encode(password);
+
+    const key = makeKey(password);
+
+    // recover nonce from 1st 8 bytes of ciphertext
+    const counterBlock = new Array(8);
+    const nonce = ciphertext.slice(0, 8);
+    for (let i = 0; i < 8; i++)
+      counterBlock[i] = nonce.charCodeAt(i);
+
+    // Recover expiry time from the next 8 bytes
+    const et = ciphertext.slice(8, 16).split("").map(c => c.charCodeAt(0));
+    const expires = bytes2long(et);
     if (expires > 0 && expires < Date.now())
       throw new Error(`Password expired on ${new Date(expires)}`);
-    const salt = cryptArr.slice(8, 16);
-    const pbe = openSSLKey(s2a(pass), salt);
-    const body = cryptArr.slice(16, cryptArr.length);
-    return rawDecrypt(body, pbe.key, pbe.iv);
-  };
-}
 
-//START_BROWSER
-function handleDecrypt() {
-  const crypt = document.getElementById("content").textContent;
-  const pass = document.getElementById("pass").value;
-  try {
-    document.body.innerHTML = new Burial().decrypt(crypt, pass);
-  } catch (e) {
-    alert(e);
+    // generate key schedule
+    const keySchedule = keyExpansion(key);
+
+    // separate ciphertext into blocks (skipping past initial 16 bytes)
+    const nBlocks = Math.ceil((ciphertext.length - 16) / /*blockSize*/16);
+    const ct = new Array(nBlocks);
+    for (let b = 0; b < nBlocks; b++)
+      ct[b] = ciphertext.slice(16 + b * /*blockSize*/16,
+                               16 + b * /*blockSize*/16 + /*blockSize*/16);
+    ciphertext = ct;  // ciphertext is now array of block-length strings
+
+    // plaintext will get generated block-by-block into array of block-length strings
+    const plaintxt = new Array(ciphertext.length);
+
+    for (let b = 0; b < nBlocks; b++) {
+      // set counter (block #) in last 8 bytes of counter block (leaving nonce in 1st 8 bytes)
+      for (let c = 0; c < 4; c++)
+        counterBlock[15 - c] = (b >>> c * 8) & 0xff;
+      for (let c = 0; c < 4; c++)
+        counterBlock[15 - c - 4] = (((b + 1) / 0x100000000-1) >>> c * 8) & 0xff;
+
+      const cipherCntr = cipher(counterBlock, keySchedule);  // encrypt counter block
+
+      const plaintxtByte = new Array(ciphertext[b].length);
+      for (let i = 0; i < ciphertext[b].length; i++) {
+        // -- xor plaintxt with ciphered counter byte-by-byte --
+        plaintxtByte[i] = cipherCntr[i] ^ ciphertext[b].charCodeAt(i);
+        plaintxtByte[i] = String.fromCharCode(plaintxtByte[i]);
+      }
+      plaintxt[b] = plaintxtByte.join('');
+    }
+
+    // join array of blocks into single plaintext string
+    let plaintext = plaintxt.join('');
+    plaintext = utf8Decode(plaintext);  // decode from UTF8 back to Unicode multi-byte chars
+
+    return plaintext;
   }
-}
 
-//START_TESTING
-export { Burial, handleDecrypt }
-//END_TESTING
+  return {
+    //START_ENCRYPT
+    encrypt: encrypt,
+    //END_ENCRYPT
+    decrypt: decrypt
+  };
+})();
 
-//END_BROWSER
+export { Burial };

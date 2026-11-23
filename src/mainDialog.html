@@ -1,0 +1,61 @@
+<html>
+  <head>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        text-align: center;
+        padding: 30px;
+        color: #202124;
+        background: #f8f9fa;
+      }
+      .btn {
+        background: #1a73e8;
+        color: white;
+        padding: 12px 24px;
+        text-decoration: none;
+        border-radius: 4px;
+        display: inline-block;
+        font-weight: 500;
+        margin-top: 15px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+      }
+      .btn:hover {
+        background: #1557b0;
+      }
+      p {
+        margin: 10px 0;
+        color: #5f6368;
+        font-size: 12pt;
+      }
+    </style>
+  </head>
+  <body>
+    Export the current sheet as an encrypted HTML file. This can be
+    downloaded onto a device and opened in a browser if the correct
+    password is entered before the expiry date.
+    <p>
+      <label for="pass">Password</label>
+      <input id ="pass" type="password" />
+    </p>
+    <p>
+      <label for="expires">Expires (optional)</label>
+      <input id="expires" type="date" value="never" />
+    </p>
+    <script>
+      function generate() {
+        const params = {
+          pass: document.getElementById("pass").value,
+          expires: new Date(document.getElementById("expires").value).getTime(),
+          content: document.getElementById('content').innerHTML
+        };
+        // Call back to Bury.gs
+        google.script.run
+        .withSuccessHandler(() => google.script.host.close())
+        .generateOfflineHtmlDownload(params);
+      }
+    </script>
+    <a id="generate" class="btn" onclick="generate()">Generate</a>
+    <!-- expands to the html being embedded -->
+    <div id="content">{{content}}</div>
+  </body>
+</html>

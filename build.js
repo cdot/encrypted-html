@@ -12,6 +12,9 @@ const srcdir = Path.resolve(`${__dirname}/src`);
 const testdir = Path.resolve(`${__dirname}/test`);
 const distdir = Path.resolve(`${__dirname}/dist`);
 
+// "production" or "debug" are valid
+const build_mode = process.argv[2];
+
 /**
  * Compares the last-modified timestamps of two files.
  * @returns {Promise<boolean>}
@@ -46,7 +49,8 @@ function load(s) {
 }
 
 function save(file, data) {
-  return Fs.writeFile(file, data);
+  return Fs.writeFile(file, data)
+  .then(() => data);
 }
 
 function embed(ins, tag, emb) {
@@ -67,14 +71,18 @@ function strip(js, sym) {
   return Promise.resolve(njs);
 }
 
-const minifyjs_options = {
-  keep_classnames: false,
-  keep_fnames: false,
-  mangle: {
-    reserved: [ "Burial", "handleDecrypt" ]
-  }
+const htmlMinifyOptions = {
+  minifyCSS: true,
+  minifyJS: {
+    keep_classnames: false,
+    keep_fnames: false,
+    mangle: true
+  },
+  collapseWhitespace: true,
+  removeComments: true,
+//  removeAttributeQuotes: true,
+  removeOptionalTags: true
 };
-
 
 // Make the dist dir if necessary
 Fs.mkdir(distdir, { recursive: true })
@@ -96,27 +104,36 @@ Fs.mkdir(distdir, { recursive: true })
       `${srcdir}/Bury.gs`,
       `${srcdir}/Burial.js`,
       `${srcdir}/convertToHtml.gs`,
-      `${srcdir}/EndUser.html`
+      `${srcdir}/EndUser.html`,
+      `${srcdir}/mainDialog.html`,
+      `${srcdir}/downloadDialog.html`
     ],
+
     () => load(`${srcdir}/Bury.gs`)
     .then(bury_gs => {
       // Make the browser version of Burial and embed it
-      return load(`${srcdir}/Burial.js`)
-      .then(js => strip(js, "ENCODE"))
-      .then(js => strip(js, "TESTING"))
-      .then(js => minifyjs(js, minifyjs_options))
-      .then(terse => bury_gs = embed(bury_gs, 'UNBURY_SCRIPT', terse.code))
+      let burial_js;
+      return Promise.all([
+        load(`${srcdir}/mainDialog.html`)
+        .then(html => build_mode === "production" ? minifyhtml(html, htmlMinifyOptions) : html),
+        load(`${srcdir}/downloadDialog.html`)
+        .then(html => build_mode === "production" ? minifyhtml(html, htmlMinifyOptions) : html)
+      ])
+      .then(bits =>
+        bury_gs = bury_gs
+        .replace(/{{downloadDialog.html}}/s, JSON.stringify(bits[1]))
+        .replace(/{{mainDialog.html}}/s, JSON.stringify(bits[0])))
 
-      // Make the compressed version of EndUser.html and embed it
+      .then(() => load(`${srcdir}/Burial.js`))
+      .then(js => strip(js, "ENCRYPT"))
+      .then(js => build_mode === "production" ? strip(js, "PARANOID") : js)
+      .then(js => burial_js = js.replace(/\s*export\s*{.*$/s, ""))
+
+      // Load EndUser.html and embed it
       .then(() => load(`${srcdir}/EndUser.html`))
-      .then(html => minifyhtml(html, {
-        minifyCSS: true,
-        collapseWhitespace: true,
-        removeComments: true,
-        removeAttributeQuotes: true,
-        removeOptionalTags: true
-      }))
-      .then(html => bury_gs = embed(bury_gs, 'END_USER_HTML', html))
+      .then(html => html.replace(/{{BURIAL}}/, burial_js))
+      .then(html => build_mode === "production" ? minifyhtml(html, htmlMinifyOptions) : html)
+      .then(html => bury_gs = embed(bury_gs, 'EndUser.html', html))
 
       // Concatenate convertToHtml
       .then(() => load(`${srcdir}/convertToHtml.gs`))
@@ -124,9 +141,18 @@ Fs.mkdir(distdir, { recursive: true })
 
       // Concatenate the gs version of Burial
       .then(() => load(`${srcdir}/Burial.js`))
-      .then(js => strip(js, "BROWSER"))
-      .then(gs => bury_gs += gs)
-
-      .then(() => save(`${distdir}/Bury.gs`, bury_gs));
-    }))
+      .then(js => js.replace(/\s*export\s*{.*$/s, ""))
+      .then(gs => bury_gs + gs);
+    })
+    .then(gs => {
+      if (build_mode !== "production")
+        return gs;
+      return minifyjs(gs, {
+        keep_classnames: false,
+        keep_fnames: false,
+        mangle: true
+      })
+      .then(terse => terse.code);
+    })
+    .then(gs => save(`${distdir}/Bury.gs`, gs)))
 ]));

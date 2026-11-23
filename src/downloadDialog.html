@@ -1,0 +1,46 @@
+<html>
+  <head>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        text-align: center;
+        padding: 30px;
+        color: #202124;
+        background: #f8f9fa;
+      }
+      .btn {
+        background: #1a73e8;
+        color: white;
+        padding: 12px 24px;
+        text-decoration: none;
+        border-radius: 4px;
+        display: inline-block;
+        font-weight: 500;
+        margin-top: 15px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+      }
+      .btn:hover {
+        background: #1557b0;
+      }
+      p {
+        margin: 10px 0;
+        color: #5f6368;
+        font-size: 12pt;
+      }
+    </style>
+  </head>
+  <body>
+    <p>
+      The encrypted HTML is ready for download.
+    </p>
+    <a id="downloadBtn" class="btn" download="{{outputFilename}}" href="{{dataUri}}">Download {{outputFilename}}</a>
+    <p style="margin-top: 20px; font-size: 12px;">If the download doesn't start automatically, click the button above.</p>
+    <script>
+      // Automatically trigger the download when the dialog loads
+      window.onload = function() {
+        const btn = document.getElementById('downloadBtn');
+        btn.click();
+      };
+    </script>
+  </body>
+</html>
