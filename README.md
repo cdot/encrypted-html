@@ -11,11 +11,12 @@ You can set a time limit on the password so it expires after a certain date, so 
 the password.
 
 ## Example
-![Description](images/1_input.png) ![Description](images/2_menu.png) ![Description](images/3_mainDialog.png) ![Description](images/4_downloadDialog.png)
+![Input](images/1_input.png) ![Menu](images/2_menu.png) ![Main Dialog](images/3_mainDialog.png) ![Download Dialog](images/4_downloadDialog.png)
 
 Download the file, then attach it in an email to the end user. When they open it in a browser, they see:
 
-![Description](images/5_encrypted.png)  ![Description](images/6_decrypted.png)
+![Encrypted](images/5_encrypted.png)  <img width="621" height="346" alt="image" src="https://github.com/user-attachments/assets/e2e07f56-c225-487a-a02e-6d46d751c8ba" />
+
 
 ## Using
 
