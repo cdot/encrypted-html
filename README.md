@@ -1,4 +1,4 @@
-# encrypted-secret
+# encrypted-html
 
 ## Introduction
 
@@ -30,9 +30,11 @@ You could e.g. attach the file to an email to the end user. When they open it in
 
 ## Using
 
-The appscript has to be loaded into any document or spreadsheet that will provide the source data. To build the appscript, use `npm run production`. The appscript is in `dist/Bury.gs`, the contents of which have to be pasted into a code file in the Google script editor. It adds a menu item to invoke the module when the containing document is next opened.
+The appscript has to be loaded into any document or spreadsheet that will provide the source data. You need `node.js`. Clone the repository and `npm install`. Then `npm run production` to package the appscript into `dist/Bury.gs`, the contents of which have to be pasted into a code file in the Google script editor. It automatically adds a menu item to invoke the module when the containing document is next opened.
 
 Note that the HTML is just an approximation of the original. Most formatting is lost.
+
+While the code is primarily written to hide the content of Google Spreadsheets and Documents, there is no reason why it couldn't be used with `node.js` to encrypt HTML from any other source (e.g. a file).
 
 ## Technical stuff
 `npm run debug` will create a functionally identical, but unminimised, version.
