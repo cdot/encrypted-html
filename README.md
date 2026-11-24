@@ -1,13 +1,27 @@
 # encrypted-secret
 
-Google appscript to support the distribution of Personally Identifiable Information (PII)
-in an encrypted container, so that event organisers are able to access the PII in event
-of an emergency, but the information is protected from casual inspection.
+## Introduction
 
-You can set a time limit on the password so it expires after a certain date.
-Uses AES 256-bit encryption to encrypt the content.
+Google appscript to support the distribution of confidential information from a Google spreadsheet or document
+in an encrypted container.
 
-To build the appscript, use `npm run production`. The main appscript is in dist/Bury.gs, which then has to be pasted into a code file in the Google script editor.
-It adds a menu item to invoke the module.
+The motivation for this was our dive club, where volunteer dive managers need access to Personally Identifiable Information (PII) in event of an emergency -
+which could happen anywhere, maybe many miles from a mobile signal. We needed some way of sharing the PII with them while protecting it from casual inspection.
+You can set a time limit on the password so it expires after a certain date, so when the trip or even is over access to the PII is no longer possible, even if you know
+the password.
 
+## Example
+![Description](images/1_input.png) ![Description](images/2_menu.png) ![Description](images/3_mainDialog.png) ![Description](images/4_downloadDialog.png)
+
+Download the file, then attach it in an email to the end user. When they open it in a browser, they see:
+
+![Description](images/5_encrypted.png)  ![Description](images/6_decrypted.png)
+
+## Using
+
+The appscript has to be loaded into any document or spreadsheet that will provide the source data. To build the appscript, use `npm run production`. The main appscript is in dist/Bury.gs, which then has to be pasted into a code file in the Google script editor. It adds a menu item to invoke the module when the containing document is next opened.
+
+## Technical stuff
 `npm run debug` will create a functionally identical, but unminimised, version.
+
+Uses AES 256-bit encryption to encrypt the content.
